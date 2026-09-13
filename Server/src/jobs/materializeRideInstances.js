@@ -26,7 +26,7 @@ export async function materializeRideInstances() {
 
 export function scheduleRideInstanceJob() {
   // Runs every day at 00:05 server time
-  cron.schedule("* * * * *", () => {
+  cron.schedule("5 0 * * *", () => {
     materializeRideInstances().catch((err) =>
       console.error("[cron] materializeRideInstances failed:", err)
     );

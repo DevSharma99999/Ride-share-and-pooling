@@ -1,6 +1,10 @@
+import { generateOneOffInstance, generateRecurringInstances } from "./rideInstanceService.js";
 import RideTemplate from "./rideTemplateModel.js";
 import Vehicle from "../vehicles/vehicleModel.js";
-import { generateOneOffInstance, generateRecurringInstances } from "./rideInstanceService.js";
+import Booking from "../bookings/bookingModel.js";
+import RideInstance from "./rideInstanceModel.js";
+import { createNotification } from "../notifications/notificationService.js";
+import mongoose from "mongoose";
 
 export async function createRideTemplate(req, res) {
   try {
@@ -48,6 +52,7 @@ export async function createRideTemplate(req, res) {
     res.status(500).json({ message: "Failed to create ride template", error: err.message });
   }
 }
+
 export const getMyRideTemplates = async (req,res)=>{
      try{
     const template = await RideTemplate.find({ driverId: req.user._id });
@@ -68,4 +73,79 @@ export const getMyRideTemplates = async (req,res)=>{
     })
 }
 }
-// export async function getMyRideTemplates(req, res) { ... } <-- your turn, see exercise below
+
+
+export async function cancelRideInstance(req, res) {
+  const { id } = req.params;
+  const session = await mongoose.startSession();
+
+  try {
+    session.startTransaction();
+
+    const instance = await RideInstance.findById(id).session(session);
+    if (!instance) {
+      throw { statusCode: 404, message: "Ride instance not found" };
+    }
+    if (String(instance.driverId) !== String(req.user._id)) {
+      throw { statusCode: 403, message: "You can only cancel your own ride instances" };
+    }
+    if (instance.status !== "scheduled") {
+      throw { statusCode: 400, message: "Only scheduled instances can be cancelled" };
+    }
+
+    instance.status = "cancelled";
+    await instance.save({ session });
+
+    // Driver-initiated cancellation = always full refund, regardless of timing (PRD 8.2)
+    const affectedBookings = await Booking.find({
+      rideInstanceId: id,
+      status: "confirmed",
+    }).session(session);
+
+    for (const booking of affectedBookings) {
+      booking.status = "cancelled_by_driver";
+      booking.cancelledAt = new Date();
+      booking.refundAmount = booking.fare; // 100%
+      await booking.save({ session });
+
+      await createNotification(
+        booking.riderId,
+        "booking_cancelled",
+        `Your booking was cancelled by the driver for the ride departing ${instance.departureDateTime.toDateString()}. You'll receive a full refund of ${booking.fare}.`,
+        booking._id,
+        session
+      );
+    }
+
+    await session.commitTransaction();
+    res.status(200).json({
+      message: "Ride instance cancelled",
+      affectedBookingsCount: affectedBookings.length,
+    });
+  } catch (err) {
+    await session.abortTransaction();
+    res.status(err.statusCode || 500).json({ message: err.message || "Cancellation failed" });
+  } finally {
+    session.endSession();
+  }
+}
+
+export const cancelRideTemplate = async (req, res) => {
+  try {
+    const template = await RideTemplate.findOne({ _id: req.params.id, driverId: req.user._id });
+    if (!template) {
+      return res.status(404).json({ message: "Ride template not found or not owned by you" });
+    }
+
+    template.status = "cancelled";
+    await template.save();
+
+    return res.status(200).json({ template });
+  } catch (error) {
+    console.error("error in cancel ride template", error);
+    return res.status(500).json({
+      success: false,
+      message: "internal error in cancelling ride template",
+    });
+  }
+};
